@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const syncFs = require('fs');
 const fs = require('fs').promises;
 const path = require('path');
 const zlib = require('zlib');
@@ -7,24 +8,8 @@ const { promisify } = require('util');
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
 
-function parseBool(value, defaultValue) {
-  const lowerValue = new String(value || defaultValue).toLowerCase().trim();
-  const trueValues = ['1', 'true', 't'];
-  const falseValues = ['0', 'false', 'f'];
-  if (trueValues.includes(lowerValue)) {
-    return true;
-  }
-  else if (falseValues.includes(lowerValue)) {
-    return false;
-  }
-  else {
-    throw new Error(`Invalid bool value: ${value}`);
-  }
-}
-
 const CACHE_PATH = process.env.CACHE_PATH || '/tmp/prerender-cache';
 const CACHE_TTL = process.env.CACHE_TTL || 3600;
-const CACHE_REMOVE_EXPIRED_ON_STARTUP = parseBool(process.env.CACHE_REMOVE_EXPIRED_ON_STARTUP, true);
 
 function log(...args) {
   if (process.env.DISABLE_LOGGING) {
@@ -66,47 +51,54 @@ class URLFileSystemCache {
   constructor({ cachePath, ttl }) {
     this.cachePath = cachePath;
     this.ttl = ttl;
-    this.startCleanupRoutine();
+    this.startCleanup();
   }
 
-  startCleanupRoutine() {
-    setInterval(
-      () => { this.cleanUpCacheDirectory(this.cachePath); },
-      this.ttl * 1000
-    );
+  startCleanup() {
+    try {
+      syncFs.access(this.cachePath);
+      setTimeout(async () => { await this.cleanUpCacheDirectory(this.cachePath); }, 0);
+    } catch { // Directory does not exist
+      log(`Creating cache directory ${this.cachePath}`);
+      syncFs.mkdirSync(this.cachePath, { recursive: true });
+    }
   }
 
   async cleanUpCacheDirectory(dirPath) {
-    try {
-      await fs.access(dirPath);
-    } catch (error) {
-      if (error.code == "ENOENT") {
-        return;  // Does not exist
-      }
-    }
+    let totalRemovedFiles = 0;
+    let totalRemovedSize = 0;
+    let totalTimersCreated = 0;
+    log('Removing expired cache files');
 
-    try {
-      const files = await fs.readdir(dirPath, { withFileTypes: true });
-      for (const file of files) {
-        const filePath = path.join(dirPath, file.name);
-        if (file.isDirectory()) {
-          await this.cleanUpCacheDirectory(filePath); // Recursive cleaning
-        } else {
-          if (await this.expiredTtl(filePath)) {
-            try {
-              await fs.unlink(filePath);
-            } catch (error) {
-              log(`ERROR while removing expired cache file ${filePath}`, error);
+    const processDirectory = async (dir) => {
+      try {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            await processDirectory(fullPath);
+          } else if (entry.name.endsWith(".data") || entry.name.endsWith(".meta")) {
+            const stats = await fs.stat(fullPath);
+            const expired = await this.isExpiredBasedOnMtime(stats.mtime);
+            if (expired) {
+              await this.removeExpiredCacheFile(fullPath);
+              totalRemovedFiles += 1;
+              totalRemovedSize += stats.size;
+            } else {
+              const ttlRemaining = this.ttl - ((new Date() - stats.mtime) / 1000);
+              setTimeout(() => this.removeExpiredCacheFile(fullPath), ttlRemaining * 1000);
+              totalTimersCreated += 1;
             }
           }
         }
+        await removeDirectoryIfEmpty(dir);
+      } catch (error) {
+        log(`ERROR cleaning up directory: ${dir}`, error);
       }
-      if (dirPath !== this.cachePath) {
-        await removeDirectoryIfEmpty(dirPath);
-      }
-    } catch (error) {
-      log('ERROR cleaning cache directory', error);
-    }
+    };
+    await processDirectory(dirPath);
+    log(`Removed ${totalRemovedFiles} files (${totalRemovedSize} bytes), scheduled ${totalTimersCreated} cache expire events`)
+    return { totalRemovedFiles, totalRemovedSize, totalTimersCreated };
   }
 
   filenameForUrl(url) {
@@ -124,31 +116,38 @@ class URLFileSystemCache {
     await fs.writeFile(filename + '.data', compressedValue);
     await fs.writeFile(filename + '.meta', JSON.stringify(metadata));
 
-    // Schedule file deletion so we save space
-    setTimeout(() => this.removeExpiredCache(url), this.ttl * 1000);
+    // Schedule file deletion when TTL is reached
+    setTimeout(() => this.removeExpiredCacheUrl(url), this.ttl * 1000);
   }
 
-  async expiredTtl(filePath) {
-    const { mtime } = await fs.stat(filePath);
+  async isExpiredBasedOnMtime(mtime) {
     const modificationDate = new Date(mtime);
     const lastModificationSeconds = (new Date() - modificationDate) / 1000;
     return lastModificationSeconds >= this.ttl;
   }
 
+  async isFileExpired(filePath) {
+    const { mtime } = await fs.stat(filePath);
+    return this.isExpiredBasedOnMtime(mtime);
+  }
+
   async get(url) {
     const filename = this.filenameForUrl(url);
+    // First, check if both files exist
     try {
       await fs.access(filename + '.data');
       await fs.access(filename + '.meta');
     } catch (error) {
       return null;
     }
-    if (await this.expiredTtl(filename + '.meta')) {
+    // Then, check if this cache entry is expired
+    if (await this.isFileExpired(filename + '.meta')) {
       await fs.unlink(filename + '.meta');
       await fs.unlink(filename + '.data');
       return null;
     }
 
+    // Finally, read files and return the contents
     try {
       const compressedContent = await fs.readFile(filename + '.data');
       const content = await gunzip(compressedContent);
@@ -163,7 +162,7 @@ class URLFileSystemCache {
     return crypto.createHash('sha1').update(url).digest('hex');
   }
 
-  async removeExpiredCache(url) {
+  async removeExpiredCacheUrl(url) {
     const filename = this.filenameForUrl(url);
     try {
       await fs.unlink(filename + '.data');
@@ -174,16 +173,21 @@ class URLFileSystemCache {
     }
   }
 
+  async removeExpiredCacheFile(filename) {
+    try {
+      await fs.unlink(filename);
+      await removeDirectoryIfEmpty(path.dirname(filename));
+    } catch (error) {
+      log(`ERROR while removing expired cache for ${filename}`, error);
+    }
+  }
+
 }
 
 module.exports = {
   init: function() {
     ensureDirExists(CACHE_PATH);
     this.cache = new URLFileSystemCache({ cachePath: CACHE_PATH, ttl: CACHE_TTL });
-    if (CACHE_REMOVE_EXPIRED_ON_STARTUP) {
-      log('Removing expired cache files');
-      this.cache.cleanUpCacheDirectory(CACHE_PATH);
-    }
   },
   requestReceived: async function(req, res, next) {
     if (req.method !== 'GET') {
