@@ -21,7 +21,7 @@ function getLogger(name) {
 const CACHE_PATH = process.env.CACHE_PATH || '/tmp/prerender-cache';
 const CACHE_TTL = process.env.CACHE_TTL || 86400;
 const log = getLogger('filesystemCache');
-// TODO: add CACHE_STATUS_CODES
+const CACHE_STATUS_CODES = process.env.CACHE_STATUS_CODES ? process.env.CACHE_STATUS_CODES.split(',').map(Number) : [200, 301, 302, 303, 304, 307, 308, 404];
 const nonCacheableHeaders = new Set([
   'age',
   'authorization',
@@ -254,7 +254,7 @@ module.exports = {
     return res.send(cachedResponse.statusCode, cachedResponse.content);
   },
   beforeSend: async function(req, res, next) {
-    if (req.method === 'GET' && req.prerender.statusCode === 200 && !req.fromCache) {
+    if (req.method === 'GET' && CACHE_STATUS_CODES.includes(req.prerender.statusCode) && !req.fromCache) {
       log('Caching', req.prerender.url, 'to', this.cache.filenameForUrl(req.prerender.url));
       await this.cache.set(req.prerender.url, req.prerender.statusCode, req.prerender.headers || {}, Buffer.from(req.prerender.content || ''));
     }
