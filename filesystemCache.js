@@ -8,24 +8,66 @@ const { promisify } = require('util');
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
 
+function getLogger(name) {
+  function log(...args) {
+    if (process.env.DISABLE_LOGGING) {
+      return;
+    }
+    console.log(new Date().toISOString(), `[${name}]`, ...args);
+  }
+  return log;
+}
+
 const CACHE_PATH = process.env.CACHE_PATH || '/tmp/prerender-cache';
 const CACHE_TTL = process.env.CACHE_TTL || 3600;
-
-function log(...args) {
-  if (process.env.DISABLE_LOGGING) {
-    return;
-  }
-  console.log(new Date().toISOString(), ...args);
-}
+const log = getLogger('filesystemCache');
+// TODO: add CACHE_STATUS_CODES
+const nonCacheableHeaders = new Set([
+  'age',
+  'authorization',
+  'cf-cache-status',
+  'cf-ray',
+  'cache-control',
+  'connection',
+  'content-encoding',
+  'content-security-policy',
+  'cookie',
+  'date',
+  'etag',
+  'expect-ct',
+  'expires',
+  'feature-policy',
+  'last-modified',
+  'nel',
+  'proxy-authorization',
+  'referrer-policy',
+  'report-to',
+  'server',
+  'set-cookie',
+  'strict-transport-security',
+  'transfer-encoding',
+  'vary',
+  'via',
+  'x-cache',
+  'x-cache-hit',
+  'x-content-type-options',
+  'x-correlation-id',
+  'x-edge-ip',
+  'x-edge-location',
+  'x-edge-origin-shield-skipped',
+  'x-frame-options',
+  'x-powered-by',
+  'x-request-id',
+]);
 
 async function ensureDirExists(dirPath) {
   try {
     await fs.access(dirPath);
-  } catch (error) {
-    if (error.code === 'ENOENT') {
+  } catch (_error) {
+    try {
       await fs.mkdir(dirPath, { recursive: true });
-    } else {
-      throw error;
+    } catch (error) {
+      log(`ERROR: cannot access directory ${dirPath}`, error);
     }
   }
 }
@@ -36,10 +78,8 @@ async function removeDirectoryIfEmpty(dirPath) {
     if (files.length === 0) {
       await fs.rmdir(dirPath);
     }
-  } catch (error) {
-    if (error.code !== 'ENOTEMPTY') {
-      log(`ERROR while removing directory ${dirPath}`, error);
-    }
+  } catch {
+    return;
   }
 }
 
@@ -56,11 +96,14 @@ class URLFileSystemCache {
 
   startCleanup() {
     try {
-      syncFs.access(this.cachePath);
+      syncFs.accessSync(this.cachePath);
       setTimeout(async () => { await this.cleanUpCacheDirectory(this.cachePath); }, 0);
-    } catch { // Directory does not exist
-      log(`Creating cache directory ${this.cachePath}`);
-      syncFs.mkdirSync(this.cachePath, { recursive: true });
+    } catch { // Directory does not exist or user does not have access to it
+      try {
+        syncFs.mkdirSync(this.cachePath, { recursive: true });
+      } catch (error) {
+        log(`ERROR: cannot create directory ${this.cachePath}`, error);
+      }
     }
   }
 
@@ -68,7 +111,7 @@ class URLFileSystemCache {
     let totalRemovedFiles = 0;
     let totalRemovedSize = 0;
     let totalTimersCreated = 0;
-    log('Removing expired cache files');
+    log('Removing expired cache files (if any)');
 
     const processDirectory = async (dir) => {
       try {
@@ -109,12 +152,19 @@ class URLFileSystemCache {
 
   async set(url, statusCode, headers, value) {
     const filename = this.filenameForUrl(url);
-    const metadata = { statusCode, headers };
     const compressedValue = await gzip(value);
+    const filteredHeaders = Object.fromEntries(
+      Object.entries(headers).filter(([key]) => !nonCacheableHeaders.has(key.toLowerCase()))
+    );
+    const metadata = { statusCode, headers: filteredHeaders };
 
-    await ensureDirExists(path.dirname(filename));
-    await fs.writeFile(filename + '.data', compressedValue);
-    await fs.writeFile(filename + '.meta', JSON.stringify(metadata));
+    try {
+      await ensureDirExists(path.dirname(filename));
+      await fs.writeFile(filename + '.data', compressedValue);
+      await fs.writeFile(filename + '.meta', JSON.stringify(metadata));
+    } catch (error) {
+      log(`ERROR: cannot write to files: ${filename}.data, ${filename}.meta`, error);
+    }
 
     // Schedule file deletion when TTL is reached
     setTimeout(() => this.removeExpiredCacheUrl(url), this.ttl * 1000);
@@ -186,7 +236,6 @@ class URLFileSystemCache {
 
 module.exports = {
   init: function() {
-    ensureDirExists(CACHE_PATH);
     this.cache = new URLFileSystemCache({ cachePath: CACHE_PATH, ttl: CACHE_TTL });
   },
   requestReceived: async function(req, res, next) {
@@ -197,7 +246,7 @@ module.exports = {
     if (!cachedResponse) {
       return next();
     }
-    log('Serving from cache:', req.prerender.url);
+    log('Serving', req.prerender.url, 'from', this.cache.filenameForUrl(req.prerender.url));
     req.fromCache = true;
     Object.entries(cachedResponse.headers).forEach(([key, value]) => {
       res.setHeader(key, value);
@@ -206,7 +255,7 @@ module.exports = {
   },
   beforeSend: async function(req, res, next) {
     if (req.prerender.statusCode === 200 && !req.fromCache) {
-      log('Caching:', req.prerender.url);
+      log('Caching', req.prerender.url, 'to', this.cache.filenameForUrl(req.prerender.url));
       await this.cache.set(req.prerender.url, req.prerender.statusCode, req.prerender.headers, Buffer.from(req.prerender.content));
     }
     return next();
