@@ -253,6 +253,7 @@ class URLFileSystemCache {
 }
 
 module.exports = {
+  URLFileSystemCache,
   init: function () {
     this.cache = new URLFileSystemCache({
       cachePath: CACHE_PATH,
