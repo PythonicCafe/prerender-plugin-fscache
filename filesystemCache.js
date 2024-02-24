@@ -254,7 +254,7 @@ module.exports = {
     return res.send(cachedResponse.statusCode, cachedResponse.content);
   },
   beforeSend: async function(req, res, next) {
-    if (req.prerender.statusCode === 200 && !req.fromCache) {
+    if (req.method === 'GET' && req.prerender.statusCode === 200 && !req.fromCache) {
       log('Caching', req.prerender.url, 'to', this.cache.filenameForUrl(req.prerender.url));
       await this.cache.set(req.prerender.url, req.prerender.statusCode, req.prerender.headers, Buffer.from(req.prerender.content));
     }
