@@ -20,7 +20,7 @@ function getLogger(name) {
 
 const CACHE_PATH = process.env.CACHE_PATH || "/tmp/prerender-cache";
 const CACHE_TTL = process.env.CACHE_TTL || 86400;
-const log = getLogger("filesystemCache");
+const log = getLogger("fscache");
 const CACHE_STATUS_CODES = process.env.CACHE_STATUS_CODES
   ? process.env.CACHE_STATUS_CODES.split(",").map(Number)
   : [200, 301, 302, 303, 304, 307, 308, 404];
