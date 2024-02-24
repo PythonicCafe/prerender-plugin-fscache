@@ -19,7 +19,7 @@ function getLogger(name) {
 }
 
 const CACHE_PATH = process.env.CACHE_PATH || '/tmp/prerender-cache';
-const CACHE_TTL = process.env.CACHE_TTL || 3600;
+const CACHE_TTL = process.env.CACHE_TTL || 86400;
 const log = getLogger('filesystemCache');
 // TODO: add CACHE_STATUS_CODES
 const nonCacheableHeaders = new Set([
