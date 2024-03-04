@@ -8,6 +8,8 @@ File system cache plugin for [prerender](https://github.com/prerender/prerender/
 - Remove headers that should not be cached (like `Date`, `Age` etc. - see `nonCacheableHeaders`)
 - Automatically remove stored files after TTL is reached (also executes a cleanup on startup)
 - Cache only GET requests and some configurable status codes
+- Won't retrieve file from cache if header `Cache-Control` has value `no-cache` (useful to pro-actively refresh the
+  cached entry)
 
 ## Usage
 

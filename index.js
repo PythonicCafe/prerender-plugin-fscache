@@ -262,6 +262,11 @@ module.exports = {
   },
   requestReceived: async function (req, res, next) {
     if (req.method !== "GET") {
+      // We only cache GET requests, so if it's not a GET, not even try to check if there's a cache for this
+      return next();
+    }
+    else if (req.headers["cache-control"] === "no-cache") {
+      // If `Cache-Control` header is set to `no-cache`, then do not serve from cache.
       return next();
     }
     const cachedResponse = await this.cache.get(req.prerender.url);
