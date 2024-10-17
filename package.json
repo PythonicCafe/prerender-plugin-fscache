@@ -3,7 +3,7 @@
   },
   "name": "prerender-plugin-fscache",
   "description": "File system cache plugin for prerender",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "main": "index.js",
   "devDependencies": {},
   "scripts": {
