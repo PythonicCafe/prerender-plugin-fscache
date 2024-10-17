@@ -281,7 +281,15 @@ module.exports = {
     );
     req.fromCache = true;
     Object.entries(cachedResponse.headers).forEach(([key, value]) => {
-      res.setHeader(key, value);
+      try {
+        res.setHeader(key, value);
+      } catch (error) {
+        log(
+          "Error setting header for URL",
+          req.prerender.url,
+          `-- key: ${key}, value: ${value}`,
+        );
+      }
     });
     return res.send(cachedResponse.statusCode, cachedResponse.content);
   },
